@@ -65,7 +65,7 @@ class FileScanner(QThread):
             try:
                 size = os.path.getsize(path)
                 ext = os.path.splitext(path)[1].lower()
-                if (not self.extensions or ext in self.extensions) and size > 512 * 1024:
+                if not self.extensions or ext in self.extensions:
                     h = self.hash_file(path)
                     dup = self.found_hashes.get(h, '')
                     if not dup:
