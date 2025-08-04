@@ -40,7 +40,6 @@ def human_readable_size(size):
         size /= 1024.0
     return f"{size:.2f} PB"
 
-
 # --- File scanning thread ---------------------------------------------------
 
 class FileScanner(QThread):
@@ -56,7 +55,6 @@ class FileScanner(QThread):
         self.found_hashes = {}
 
     def run(self):
-        # Gather all files under the chosen folder
         file_list = []
         for root, dirs, files in os.walk(self.folder):
             if any(root.startswith(ex) for ex in EXCLUDED_DIRS):
@@ -81,11 +79,11 @@ class FileScanner(QThread):
                         self.found_hashes[h] = path
                     print(f"[DEBUG] Emitting file_found for {path!r}")
                     self.file_found.emit(
-                        os.path.basename(path),  # filename
-                        size,                    # size in bytes
-                        path,                    # full path
-                        'No',                    # archived flag
-                        dup                      # duplicate_of
+                        os.path.basename(path),
+                        size,
+                        path,
+                        'No',
+                        dup
                     )
             except Exception as e:
                 print(f"[DEBUG] Error on {path!r}: {e}")
@@ -107,7 +105,6 @@ class FileScanner(QThread):
 
     def stop(self):
         self._is_running = False
-
 
 # --- Main application window ------------------------------------------------
 
@@ -176,14 +173,11 @@ class CleanupApp(QMainWindow):
         move_btn.clicked.connect(self.move_selected)
         archive_btn = QPushButton("Archive Selected")
         archive_btn.clicked.connect(self.archive_selected)
-        select_dup_btn = QPushButton("Select Duplicates")
-        select_dup_btn.clicked.connect(self.select_duplicates)
 
         act_layout = QHBoxLayout()
         act_layout.addWidget(delete_btn)
         act_layout.addWidget(move_btn)
         act_layout.addWidget(archive_btn)
-        act_layout.addWidget(select_dup_btn)
         act_layout.addWidget(self.space_saved_label)
 
         # Assemble everything
@@ -247,25 +241,32 @@ class CleanupApp(QMainWindow):
         row = self.table.rowCount()
         self.table.insertRow(row)
 
+        # checkbox with shift-click support
         chk = QCheckBox()
-        chk.stateChanged.connect(lambda state, r=row: self.on_checkbox_clicked(r, state == Qt.Checked))
+        chk.stateChanged.connect(
+            lambda state, r=row: self.on_checkbox_clicked(r, state == Qt.Checked)
+        )
         self.table.setCellWidget(row, 0, chk)
 
+        # filename + tooltip preview
         item_name = QTableWidgetItem(name)
         if os.path.splitext(path)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
             item_name.setToolTip(f"<img src='{path}' width='200'>")
         self.table.setItem(row, 1, item_name)
 
+        # extension and size
         ext = os.path.splitext(path)[1].lower()
         self.table.setItem(row, 2, QTableWidgetItem(ext))
         self.table.setItem(row, 3, QTableWidgetItem(human_readable_size(size)))
 
+        # truncated path display + tooltip
         max_len = 60
         display = path if len(path) <= max_len else f"...{path[-(max_len-3):]}"
         item_path = QTableWidgetItem(display)
         item_path.setToolTip(path)
         self.table.setItem(row, 4, item_path)
 
+        # archived, last-modified, duplicate-of
         self.table.setItem(row, 5, QTableWidgetItem(archived))
         try:
             mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime('%Y-%m-%d %H:%M')
@@ -285,14 +286,11 @@ class CleanupApp(QMainWindow):
         if mods & Qt.ShiftModifier and self.last_checked_row is not None:
             start, end = sorted([row, self.last_checked_row])
             for r in range(start, end + 1):
-                self.table.cellWidget(r, 0).setChecked(checked)
+                chk = self.table.cellWidget(r, 0)
+                chk.blockSignals(True)
+                chk.setChecked(checked)
+                chk.blockSignals(False)
         self.last_checked_row = row
-        self.update_space_label()
-
-    def select_duplicates(self):
-        for r in range(self.table.rowCount()):
-            if self.table.item(r, 7).text():
-                self.table.cellWidget(r, 0).setChecked(True)
         self.update_space_label()
 
     def on_cell_clicked(self, row, col):
@@ -335,7 +333,9 @@ class CleanupApp(QMainWindow):
         self.update_space_label()
 
     def move_selected(self):
-        dest = QFileDialog.getExistingDirectory(self, "Select Destination", os.path.expanduser("~/Downloads"), QFileDialog.ShowDirsOnly)
+        dest = QFileDialog.getExistingDirectory(
+            self, "Select Destination", os.path.expanduser("~/Downloads"), QFileDialog.ShowDirsOnly
+        )
         if not dest:
             return
         for r in self.get_selected_rows():
@@ -368,9 +368,6 @@ class CleanupApp(QMainWindow):
                     pass
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
         self.update_space_label()
-
-
-# --- Application entry point -----------------------------------------------
 
 if __name__ == "__main__":
     print("[DEBUG] Application starting")
