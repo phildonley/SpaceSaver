@@ -59,7 +59,6 @@ class FileScanner(QThread):
         # Gather all files under the chosen folder
         file_list = []
         for root, dirs, files in os.walk(self.folder):
-            # skip system dirs if they appear under the chosen folder
             if any(root.startswith(ex) for ex in EXCLUDED_DIRS):
                 continue
             for f in files:
@@ -75,7 +74,6 @@ class FileScanner(QThread):
                 ext  = os.path.splitext(path)[1].lower()
                 print(f"[DEBUG] {idx+1}/{total}: {path!r} ext={ext} size={size}")
 
-                # only filter by extension (no size cutoff)
                 if not self.extensions or ext in self.extensions:
                     h   = self.hash_file(path)
                     dup = self.found_hashes.get(h, '')
@@ -144,7 +142,6 @@ class CleanupApp(QMainWindow):
             "", "Filename", "Extension", "Size",
             "Path", "Archived", "Last Modified", "Duplicate Of"
         ])
-        # narrow the checkbox, extension, and archived columns
         self.table.setColumnWidth(0, 30)
         self.table.setColumnWidth(2, 80)
         self.table.setColumnWidth(5, 60)
@@ -159,7 +156,7 @@ class CleanupApp(QMainWindow):
         for ext in COMMON_EXTENSIONS:
             self.ext_box.addItem(ext)
 
-        # Scan button
+        # Scan button and status
         scan_btn = QPushButton("Scan for Space")
         scan_btn.clicked.connect(self.scan_files)
         self.progress = QProgressBar()
@@ -179,11 +176,14 @@ class CleanupApp(QMainWindow):
         move_btn.clicked.connect(self.move_selected)
         archive_btn = QPushButton("Archive Selected")
         archive_btn.clicked.connect(self.archive_selected)
+        select_dup_btn = QPushButton("Select Duplicates")
+        select_dup_btn.clicked.connect(self.select_duplicates)
 
         act_layout = QHBoxLayout()
         act_layout.addWidget(delete_btn)
         act_layout.addWidget(move_btn)
         act_layout.addWidget(archive_btn)
+        act_layout.addWidget(select_dup_btn)
         act_layout.addWidget(self.space_saved_label)
 
         # Assemble everything
@@ -212,20 +212,17 @@ class CleanupApp(QMainWindow):
 
     def handle_header_click(self, idx):
         if idx == 0:
-            # Toggle all row checkboxes
             new_state = not all(
                 self.table.cellWidget(r, 0).isChecked()
                 for r in range(self.table.rowCount())
             )
             for r in range(self.table.rowCount()):
                 self.table.cellWidget(r, 0).setChecked(new_state)
-            # update header checkbox symbol
             symbol = "☑" if new_state else "☐"
             self.table.horizontalHeaderItem(0).setText(symbol)
             self.update_space_label()
 
     def scan_files(self):
-        # default to ~/Downloads, force dir-only dialog
         downloads = os.path.expanduser("~/Downloads")
         folder = QFileDialog.getExistingDirectory(
             self, "Select Folder", downloads, QFileDialog.ShowDirsOnly
@@ -250,41 +247,33 @@ class CleanupApp(QMainWindow):
         row = self.table.rowCount()
         self.table.insertRow(row)
 
-        # checkbox with shift-click support
         chk = QCheckBox()
-        chk.clicked.connect(lambda _, r=row, c=chk.isChecked(): self.on_checkbox_clicked(r, c))
+        chk.stateChanged.connect(lambda state, r=row: self.on_checkbox_clicked(r, state == Qt.Checked))
         self.table.setCellWidget(row, 0, chk)
 
-        # filename with image tooltip preview
         item_name = QTableWidgetItem(name)
         if os.path.splitext(path)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
             item_name.setToolTip(f"<img src='{path}' width='200'>")
         self.table.setItem(row, 1, item_name)
 
-        # extension and size
         ext = os.path.splitext(path)[1].lower()
         self.table.setItem(row, 2, QTableWidgetItem(ext))
         self.table.setItem(row, 3, QTableWidgetItem(human_readable_size(size)))
 
-        # path – truncated at front, full-path in tooltip
         max_len = 60
         display = path if len(path) <= max_len else f"...{path[-(max_len-3):]}"
         item_path = QTableWidgetItem(display)
         item_path.setToolTip(path)
         self.table.setItem(row, 4, item_path)
 
-        # archived, last-modified, duplicate-of
         self.table.setItem(row, 5, QTableWidgetItem(archived))
         try:
-            mod_time = datetime.datetime.fromtimestamp(
-                os.path.getmtime(path)
-            ).strftime('%Y-%m-%d %H:%M')
+            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime('%Y-%m-%d %H:%M')
         except Exception:
             mod_time = ""
         self.table.setItem(row, 6, QTableWidgetItem(mod_time))
         self.table.setItem(row, 7, QTableWidgetItem(duplicate_of))
 
-        # highlight duplicates
         if duplicate_of:
             for col in range(8):
                 itm = self.table.item(row, col)
@@ -300,8 +289,13 @@ class CleanupApp(QMainWindow):
         self.last_checked_row = row
         self.update_space_label()
 
+    def select_duplicates(self):
+        for r in range(self.table.rowCount()):
+            if self.table.item(r, 7).text():
+                self.table.cellWidget(r, 0).setChecked(True)
+        self.update_space_label()
+
     def on_cell_clicked(self, row, col):
-        # open containing folder if path column clicked
         if col == 4:
             full = self.table.item(row, 4).toolTip()
             folder = os.path.dirname(full)
@@ -325,7 +319,7 @@ class CleanupApp(QMainWindow):
         unit_map = {'B':1/1024**2, 'KB':1/1024, 'MB':1, 'GB':1024, 'TB':1024**2}
         total = 0.0
         for r in self.get_selected_rows():
-            text = self.table.item(r, 3).text()  # size column
+            text = self.table.item(r, 3).text()
             num, unit = text.split()
             total += float(num) * unit_map.get(unit, 1)
         self.space_saved_label.setText(f"Space to be freed: {total:.2f} MB")
@@ -348,7 +342,6 @@ class CleanupApp(QMainWindow):
             full = self.table.item(r, 4).toolTip()
             try:
                 newp = shutil.move(full, dest)
-                # update displayed path
                 display = newp if len(newp) <= 60 else f"...{newp[-57:]}"
                 item = self.table.item(r, 4)
                 item.setText(display)
