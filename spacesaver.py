@@ -111,7 +111,7 @@ class FileScanner(QThread):
 class CleanupApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Futuristic File Cleanup")
+        self.setWindowTitle("Easy Archive")
         self.setStyleSheet("""
             QPushButton { background-color: #E30613; color: white; border: none;
                           padding: 8px 16px; font-weight: bold; border-radius: 8px; }
