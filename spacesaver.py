@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 import hashlib
 import zipfile
 import json
@@ -11,7 +12,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView,
     QHBoxLayout, QLabel, QCheckBox, QComboBox
 )
-from PyQt5.QtGui import QColor, QPixmap
+from PyQt5.QtGui import QColor
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 # --- Configuration ----------------------------------------------------------
@@ -39,6 +40,7 @@ def human_readable_size(size):
         size /= 1024.0
     return f"{size:.2f} PB"
 
+
 # --- File scanning thread ---------------------------------------------------
 
 class FileScanner(QThread):
@@ -54,9 +56,10 @@ class FileScanner(QThread):
         self.found_hashes = {}
 
     def run(self):
-        # Gather all files under the folder
+        # Gather all files under the chosen folder
         file_list = []
         for root, dirs, files in os.walk(self.folder):
+            # skip system dirs if they appear under the chosen folder
             if any(root.startswith(ex) for ex in EXCLUDED_DIRS):
                 continue
             for f in files:
@@ -64,16 +67,15 @@ class FileScanner(QThread):
 
         total = len(file_list)
         print(f"[DEBUG] Scanning folder {self.folder!r}, found {total} files")
-        # Process each file
         for idx, path in enumerate(file_list):
             if not self._is_running:
                 break
             try:
                 size = os.path.getsize(path)
                 ext  = os.path.splitext(path)[1].lower()
-                print(f"[DEBUG] {idx+1}/{total}: {path!r} -> ext={ext}, size={size} bytes")
+                print(f"[DEBUG] {idx+1}/{total}: {path!r} ext={ext} size={size}")
 
-                # Only filter by extension now (no 512 KB cutoff)
+                # only filter by extension (no size cutoff)
                 if not self.extensions or ext in self.extensions:
                     h   = self.hash_file(path)
                     dup = self.found_hashes.get(h, '')
@@ -81,19 +83,18 @@ class FileScanner(QThread):
                         self.found_hashes[h] = path
                     print(f"[DEBUG] Emitting file_found for {path!r}")
                     self.file_found.emit(
-                        os.path.basename(path),
-                        size,
-                        path,
-                        'No',
-                        dup
+                        os.path.basename(path),  # filename
+                        size,                    # size in bytes
+                        path,                    # full path
+                        'No',                    # archived flag
+                        dup                      # duplicate_of
                     )
             except Exception as e:
-                print(f"[DEBUG] Error processing {path!r}: {e}")
+                print(f"[DEBUG] Error on {path!r}: {e}")
 
-            # Update progress bar
             self.progress.emit(int((idx + 1) / total * 100))
 
-        print("[DEBUG] Scan complete, emitting finished")
+        print("[DEBUG] Scan complete")
         self.finished.emit()
 
     def hash_file(self, path):
@@ -108,6 +109,7 @@ class FileScanner(QThread):
 
     def stop(self):
         self._is_running = False
+
 
 # --- Main application window ------------------------------------------------
 
@@ -127,29 +129,37 @@ class CleanupApp(QMainWindow):
 
         self.last_checked_row = None
 
-        # Drive usage UI
+        # Drive usage bar
         self.drive_label    = QLabel("Drive Usage: Calculating...")
         self.drive_progress = QProgressBar()
         self.drive_progress.setMaximum(100)
         self.update_drive_usage()
 
-        # Table setup with 8 columns
+        # Table with 8 columns; first header is an empty checkbox
         self.table = QTableWidget(0, 8)
+        header_item = QTableWidgetItem("☐")
+        header_item.setTextAlignment(Qt.AlignCenter)
+        self.table.setHorizontalHeaderItem(0, header_item)
         self.table.setHorizontalHeaderLabels([
-            "Select", "Filename", "Extension", "Size",
+            "", "Filename", "Extension", "Size",
             "Path", "Archived", "Last Modified", "Duplicate Of"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # narrow the checkbox, extension, and archived columns
+        self.table.setColumnWidth(0, 30)
+        self.table.setColumnWidth(2, 80)
+        self.table.setColumnWidth(5, 60)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().sectionClicked.connect(self.handle_header_click)
+        self.table.cellClicked.connect(self.on_cell_clicked)
 
-        # Filter combo-box
+        # File-type filter
         self.ext_box = QComboBox()
         self.ext_box.addItem("All")
         for ext in COMMON_EXTENSIONS:
             self.ext_box.addItem(ext)
 
-        # Scan button and progress
+        # Scan button
         scan_btn = QPushButton("Scan for Space")
         scan_btn.clicked.connect(self.scan_files)
         self.progress = QProgressBar()
@@ -157,7 +167,6 @@ class CleanupApp(QMainWindow):
         self.space_saved_label = QLabel("Space to be freed: 0.00 MB")
 
         ctrl_layout = QHBoxLayout()
-        ctrl_layout.addWidget(QLabel("File Type:"))
         ctrl_layout.addWidget(self.ext_box)
         ctrl_layout.addWidget(scan_btn)
         ctrl_layout.addWidget(self.progress)
@@ -177,7 +186,7 @@ class CleanupApp(QMainWindow):
         act_layout.addWidget(archive_btn)
         act_layout.addWidget(self.space_saved_label)
 
-        # Assemble main layout
+        # Assemble everything
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.drive_label)
         main_layout.addWidget(self.drive_progress)
@@ -203,137 +212,151 @@ class CleanupApp(QMainWindow):
 
     def handle_header_click(self, idx):
         if idx == 0:
-            # Toggle all checkboxes
+            # Toggle all row checkboxes
             new_state = not all(
                 self.table.cellWidget(r, 0).isChecked()
                 for r in range(self.table.rowCount())
             )
             for r in range(self.table.rowCount()):
                 self.table.cellWidget(r, 0).setChecked(new_state)
+            # update header checkbox symbol
+            symbol = "☑" if new_state else "☐"
+            self.table.horizontalHeaderItem(0).setText(symbol)
             self.update_space_label()
 
     def scan_files(self):
+        # default to ~/Downloads, force dir-only dialog
         downloads = os.path.expanduser("~/Downloads")
-        folder    = QFileDialog.getExistingDirectory(
-            self, "Select Folder", downloads
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder", downloads, QFileDialog.ShowDirsOnly
         )
-        print(f"[DEBUG] scan_files called, folder selected: {folder!r}")
+        print(f"[DEBUG] scan_files → folder: {folder!r}")
         if not folder:
-            print("[DEBUG] No folder selected, aborting scan")
             return
 
         ext  = self.ext_box.currentText()
         filt = [] if ext == "All" else [ext]
-        print(f"[DEBUG] Filtering for extensions: {filt}")
+        print(f"[DEBUG] Filtering extensions: {filt}")
 
         self.table.setRowCount(0)
         self.scanner = FileScanner(folder, filt)
         self.scanner.file_found.connect(self.add_file)
-        print("[DEBUG] Connected file_found → add_file")
         self.scanner.progress.connect(self.progress.setValue)
         self.scanner.finished.connect(lambda: self.status.setText("Done."))
         self.scanner.start()
 
     def add_file(self, name, size, path, archived, duplicate_of):
-        print(f"[DEBUG] add_file received: {path!r}")
+        print(f"[DEBUG] add_file → {path!r}")
         row = self.table.rowCount()
         self.table.insertRow(row)
 
-        # Checkbox with shift-click support
+        # checkbox with shift-click support
         chk = QCheckBox()
-        chk.clicked.connect(
-            lambda _, r=row, c=chk.isChecked(): self.on_checkbox_clicked(r, c)
-        )
+        chk.clicked.connect(lambda _, r=row, c=chk.isChecked(): self.on_checkbox_clicked(r, c))
         self.table.setCellWidget(row, 0, chk)
 
-        # File metadata
+        # filename with image tooltip preview
+        item_name = QTableWidgetItem(name)
+        if os.path.splitext(path)[1].lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
+            item_name.setToolTip(f"<img src='{path}' width='200'>")
+        self.table.setItem(row, 1, item_name)
+
+        # extension and size
         ext = os.path.splitext(path)[1].lower()
+        self.table.setItem(row, 2, QTableWidgetItem(ext))
+        self.table.setItem(row, 3, QTableWidgetItem(human_readable_size(size)))
+
+        # path – truncated at front, full-path in tooltip
+        max_len = 60
+        display = path if len(path) <= max_len else f"...{path[-(max_len-3):]}"
+        item_path = QTableWidgetItem(display)
+        item_path.setToolTip(path)
+        self.table.setItem(row, 4, item_path)
+
+        # archived, last-modified, duplicate-of
+        self.table.setItem(row, 5, QTableWidgetItem(archived))
         try:
             mod_time = datetime.datetime.fromtimestamp(
                 os.path.getmtime(path)
             ).strftime('%Y-%m-%d %H:%M')
         except Exception:
             mod_time = ""
-
-        self.table.setItem(row, 1, QTableWidgetItem(name))
-        self.table.setItem(row, 2, QTableWidgetItem(ext))
-        self.table.setItem(row, 3, QTableWidgetItem(human_readable_size(size)))
-        self.table.setItem(row, 4, QTableWidgetItem(path))
-        self.table.setItem(row, 5, QTableWidgetItem(archived))
         self.table.setItem(row, 6, QTableWidgetItem(mod_time))
         self.table.setItem(row, 7, QTableWidgetItem(duplicate_of))
 
-        # Highlight duplicates
+        # highlight duplicates
         if duplicate_of:
             for col in range(8):
                 itm = self.table.item(row, col)
                 if itm:
                     itm.setBackground(QColor("#800000"))
 
-        # Inline thumbnail for images
-        if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
-            pix = QPixmap(path).scaledToWidth(100, Qt.SmoothTransformation)
-            self.table.item(row, 1).setData(Qt.DecorationRole, pix)
-
     def on_checkbox_clicked(self, row, checked):
-        print(f"[DEBUG] Checkbox clicked at row {row}, checked={checked}")
         mods = QApplication.keyboardModifiers()
         if mods & Qt.ShiftModifier and self.last_checked_row is not None:
             start, end = sorted([row, self.last_checked_row])
-            print(f"[DEBUG] Shift-select from {start} to {end}")
             for r in range(start, end + 1):
                 self.table.cellWidget(r, 0).setChecked(checked)
         self.last_checked_row = row
         self.update_space_label()
 
+    def on_cell_clicked(self, row, col):
+        # open containing folder if path column clicked
+        if col == 4:
+            full = self.table.item(row, 4).toolTip()
+            folder = os.path.dirname(full)
+            try:
+                if sys.platform.startswith('win'):
+                    os.startfile(folder)
+                elif sys.platform.startswith('darwin'):
+                    subprocess.Popen(['open', folder])
+                else:
+                    subprocess.Popen(['xdg-open', folder])
+            except Exception:
+                pass
+
     def get_selected_rows(self):
-        selected = [
+        return [
             r for r in range(self.table.rowCount())
             if self.table.cellWidget(r, 0).isChecked()
         ]
-        print(f"[DEBUG] Selected rows: {selected}")
-        return selected
 
     def update_space_label(self):
-        unit_map = {
-            'B': 1/(1024**2), 'KB': 1/1024,
-            'MB': 1, 'GB': 1024, 'TB': 1024**2
-        }
+        unit_map = {'B':1/1024**2, 'KB':1/1024, 'MB':1, 'GB':1024, 'TB':1024**2}
         total = 0.0
         for r in self.get_selected_rows():
-            text = self.table.item(r, 3).text()  # Size column
+            text = self.table.item(r, 3).text()  # size column
             num, unit = text.split()
             total += float(num) * unit_map.get(unit, 1)
-        print(f"[DEBUG] update_space_label: total MB={total:.2f}")
         self.space_saved_label.setText(f"Space to be freed: {total:.2f} MB")
 
     def delete_selected(self):
-        print("[DEBUG] delete_selected called")
         for r in reversed(self.get_selected_rows()):
-            path = self.table.item(r, 4).text()
+            full = self.table.item(r, 4).toolTip()
             try:
-                os.remove(path)
+                os.remove(full)
                 self.table.removeRow(r)
-            except Exception as e:
-                print(f"[DEBUG] Failed to delete {path!r}: {e}")
+            except Exception:
+                pass
         self.update_space_label()
 
     def move_selected(self):
-        print("[DEBUG] move_selected called")
-        dest = QFileDialog.getExistingDirectory(self, "Select Destination")
-        print(f"[DEBUG] Destination folder: {dest!r}")
+        dest = QFileDialog.getExistingDirectory(self, "Select Destination", os.path.expanduser("~/Downloads"), QFileDialog.ShowDirsOnly)
         if not dest:
             return
         for r in self.get_selected_rows():
-            path = self.table.item(r, 4).text()
+            full = self.table.item(r, 4).toolTip()
             try:
-                newp = shutil.move(path, dest)
-                self.table.item(r, 4).setText(newp)
-            except Exception as e:
-                print(f"[DEBUG] Failed to move {path!r}: {e}")
+                newp = shutil.move(full, dest)
+                # update displayed path
+                display = newp if len(newp) <= 60 else f"...{newp[-57:]}"
+                item = self.table.item(r, 4)
+                item.setText(display)
+                item.setToolTip(newp)
+            except Exception:
+                pass
 
     def archive_selected(self):
-        print("[DEBUG] archive_selected called")
         archive_dir = os.path.expanduser("~/Documents/ImageCleanup_Archives")
         os.makedirs(archive_dir, exist_ok=True)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -341,17 +364,18 @@ class CleanupApp(QMainWindow):
         manifest = {}
         with zipfile.ZipFile(zip_path, 'w') as zf:
             for r in self.get_selected_rows():
-                path = self.table.item(r, 4).text()
-                name = os.path.basename(path)
+                full = self.table.item(r, 4).toolTip()
+                name = os.path.basename(full)
                 try:
-                    zf.write(path, name)
-                    manifest[name] = path
-                    os.remove(path)
+                    zf.write(full, name)
+                    manifest[name] = full
+                    os.remove(full)
                     self.table.item(r, 5).setText("Yes")
-                except Exception as e:
-                    print(f"[DEBUG] Failed to archive {path!r}: {e}")
+                except Exception:
+                    pass
             zf.writestr("manifest.json", json.dumps(manifest, indent=2))
         self.update_space_label()
+
 
 # --- Application entry point -----------------------------------------------
 
